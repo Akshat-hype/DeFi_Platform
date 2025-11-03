@@ -1,25 +1,15 @@
-# # DeFi Lending & Borrowing Platform
+# Basic Sample Hardhat Project
 
-This project is a lightweight DeFi protocol built with Solidity that enables lending and borrowing between two tokens in a controlled ecosystem. The platform is composed of three smart contracts:
+This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, a sample script that deploys that contract, and an example of a task implementation, which simply lists the available accounts.
 
-Token1 Contract – ERC-20 implementation for the first token.
+Try running some of the following tasks:
 
-Token2 Contract – ERC-20 implementation for the second token.
-
-Core Protocol Contract – The main contract that manages the lending, borrowing, collateral, and repayment logic between Token1 and Token2.
-
-# Features
-
-🔗 Two-token ecosystem – keeps the protocol simple and easy to audit.
-
-💸 Lending & Borrowing – deposit one token as collateral and borrow the other.
-
-⛓️ On-chain logic – all transactions are executed through smart contracts without intermediaries.
-
-🔐 Transparency & Security – follows DeFi principles with clear separation of concerns across contracts.
-
-# Tech Stack
-
-Solidity – Smart contracts
-
-Hardhat/Remix – Development & testing environment
+```shell
+npx hardhat accounts
+npx hardhat compile
+npx hardhat clean
+npx hardhat test
+npx hardhat node
+node scripts/sample-script.js
+npx hardhat help
+```
