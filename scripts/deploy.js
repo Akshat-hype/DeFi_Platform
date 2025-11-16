@@ -1,126 +1,92 @@
-const hre = require("hardhat");
-const { ethers } = hre;
-
-const DECIMALS = 18;
-
-// Supply configuration (human units)
-const SUPPLIES = {
-  BTC: "1000",        // 1,000
-  ETH: "100000",      // 100,000
-  BNB: "500000",      // 500,000
-  USDT: "10000000",   // 10,000,000
-  SUI: "5000000"      // 5,000,000
-};
-
-function toUnits(n) {
-  return ethers.utils.parseUnits(n, DECIMALS);
-}
+// scripts/deploy.js
+const { ethers } = require("hardhat");
 
 async function main() {
-  const [deployer, ...rest] = await ethers.getSigners();
-  const users = rest.slice(0, 10);
-  console.log(`🚀 Deploying contracts with: ${deployer.address}`);
+  const [deployer] = await ethers.getSigners();
+  console.log("Deployer:", deployer.address);
 
-  // 1️⃣ Deploy PriceFeed
+  // 1) Deploy PriceFeed
   const PriceFeed = await ethers.getContractFactory("PriceFeed");
   const priceFeed = await PriceFeed.deploy();
   await priceFeed.deployed();
-  console.log("✅ PriceFeed deployed:", priceFeed.address);
+  console.log("PriceFeed:", priceFeed.address);
 
-  // 2️⃣ Deploy InterestRateModel
-  const IRM = await ethers.getContractFactory("InterestRateModel");
-  const irm = await IRM.deploy();
-  await irm.deployed();
-  console.log("✅ InterestRateModel deployed:", irm.address);
+  // 2) Deploy ERC20 tokens (supply scaled to 18 decimals)
+  const ERC20Token = await ethers.getContractFactory("ERC20Token");
 
-  // 3️⃣ Deploy mock tokens
-  const MockToken = await ethers.getContractFactory("MockToken");
+  const decimals = ethers.BigNumber.from("10").pow("18");
+  const tokensToDeploy = [
+    { name: "BitcoinToken", symbol: "BTC", supply: "1000" },
+    { name: "EthereumToken", symbol: "ETH", supply: "100000" },
+    { name: "TetherToken", symbol: "USDT", supply: "10000000" },
+    { name: "BinanceToken", symbol: "BNB", supply: "500000" },
+    { name: "SuiToken", symbol: "SUI", supply: "5000000" },
+  ];
 
-  const btc = await MockToken.deploy("Bitcoin", "BTC", toUnits(SUPPLIES.BTC), deployer.address);
-  const eth = await MockToken.deploy("Ethereum", "ETH", toUnits(SUPPLIES.ETH), deployer.address);
-  const bnb = await MockToken.deploy("BNB", "BNB", toUnits(SUPPLIES.BNB), deployer.address);
-  const usdt = await MockToken.deploy("Tether USD", "USDT", toUnits(SUPPLIES.USDT), deployer.address);
-  const sui = await MockToken.deploy("Sui", "SUI", toUnits(SUPPLIES.SUI), deployer.address);
-
-  await Promise.all([
-    btc.deployed(),
-    eth.deployed(),
-    bnb.deployed(),
-    usdt.deployed(),
-    sui.deployed(),
-  ]);
-
-  console.log("✅ Tokens deployed:");
-  console.table({
-    BTC: btc.address,
-    ETH: eth.address,
-    BNB: bnb.address,
-    USDT: usdt.address,
-    SUI: sui.address,
-  });
-
-  // 4️⃣ Set deposit/withdraw fees per token
-  // Base deposit/withdraw fees (in basis points)
-  await (await irm.setFees(btc.address, 100, 300)).wait(); // 1% dep, 3% wdr
-  await (await irm.setFees(eth.address, 300, 500)).wait(); // 3% dep, 5% wdr
-  await (await irm.setFees(bnb.address, 200, 400)).wait(); // 2% dep, 4% wdr
-  await (await irm.setFees(usdt.address, 500, 900)).wait(); // 5% dep, 9% wdr
-  await (await irm.setFees(sui.address, 400, 1000)).wait(); // 4% dep, 10% wdr
-  console.log("✅ Interest rates configured for all tokens");
-
-  // 5️⃣ Deploy LendingPool
-  const LendingPool = await ethers.getContractFactory("LendingPool");
-  const pool = await LendingPool.deploy(irm.address, priceFeed.address);
-  await pool.deployed();
-  console.log("✅ LendingPool deployed:", pool.address);
-
-  // 6️⃣ Link tokens to symbols (for oracle lookups)
-  await (await pool.setTokenSymbol(btc.address, "bitcoin")).wait();
-  await (await pool.setTokenSymbol(eth.address, "ethereum")).wait();
-  await (await pool.setTokenSymbol(bnb.address, "binancecoin")).wait();
-  await (await pool.setTokenSymbol(usdt.address, "tether")).wait();
-  await (await pool.setTokenSymbol(sui.address, "sui"));
-  console.log("✅ Token symbols linked to LendingPool");
-
-  // 7️⃣ Seed pool with 10% supply, distribute 90% to users
-  async function seedAndDistribute(token, supplyHuman) {
-    const total = toUnits(supplyHuman);
-    const tenPercent = total.div(10);
-    const ninetyPercent = total.sub(tenPercent);
-    const perUser = ninetyPercent.div(users.length);
-
-    // Approve & deposit 10% to pool
-    await (await token.approve(pool.address, tenPercent)).wait();
-    await (await pool.deposit(token.address, tenPercent)).wait();
-
-    // Distribute 90% among 10 users
-    for (const u of users) {
-      await (await token.transfer(u.address, perUser)).wait();
-    }
+  const deployed = {};
+  for (const t of tokensToDeploy) {
+    const supply = ethers.BigNumber.from(t.supply).mul(decimals);
+    const token = await ERC20Token.deploy(t.name, t.symbol, supply);
+    await token.deployed();
+    console.log(`${t.symbol} deployed at ${token.address}, supply ${t.supply}`);
+    deployed[t.symbol] = token;
   }
 
-  await seedAndDistribute(btc, SUPPLIES.BTC);
-  await seedAndDistribute(eth, SUPPLIES.ETH);
-  await seedAndDistribute(bnb, SUPPLIES.BNB);
-  await seedAndDistribute(usdt, SUPPLIES.USDT);
-  await seedAndDistribute(sui, SUPPLIES.SUI);
+  // 3) Deploy LendingPool
+  const LendingPool = await ethers.getContractFactory("LendingPool");
+  const pool = await LendingPool.deploy(priceFeed.address);
+  await pool.deployed();
+  console.log("LendingPool:", pool.address);
 
-  console.log("✅ Pool seeded (10%) and tokens distributed (90%)");
+  // 4) Configure tokens in pool with rates derived from ratios
+  // Ratios you specified: (lend:borrow)
+  const ratios = {
+    BTC: { lend: 1, borrow: 3 },
+    ETH: { lend: 3, borrow: 5 },
+    USDT: { lend: 5, borrow: 9 },
+    BNB: { lend: 2, borrow: 4 },
+    SUI: { lend: 4, borrow: 10 }
+  };
 
-  // 📊 Final summary
-  console.table({
-    PriceFeed: priceFeed.address,
-    InterestRateModel: irm.address,
-    LendingPool: pool.address,
-    BTC: btc.address,
-    ETH: eth.address,
-    BNB: bnb.address,
-    USDT: usdt.address,
-    SUI: sui.address,
-  });
+  // base rate = 1% (you can change)
+  const baseRate = ethers.BigNumber.from("10000000000000000"); 
+// = 0.01 * 1e18 = 1e16 (WAD representation)
+
+for (const sym of Object.keys(ratios)) {
+  const r = ratios[sym];
+
+  const lendRateWad = baseRate.mul(r.lend);
+  const borrowRateWad = baseRate.mul(r.borrow);
+
+  await pool.addToken(
+    deployed[sym].address,
+    sym.toLowerCase(),
+    lendRateWad,
+    borrowRateWad
+  );
+
+  console.log(`Configured ${sym} - lendRateWad: ${lendRateWad.toString()}, borrowRateWad: ${borrowRateWad.toString()}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+
+  // set collateral token to USDT
+  await (await pool.setCollateral(deployed["USDT"].address, "tether")).wait();
+  console.log("Set collateral token -> USDT");
+
+  // 5) Transfer 10% of each token supply to pool as initial liquidity
+  for (const t of tokensToDeploy) {
+    const token = deployed[t.symbol];
+    const supply = ethers.BigNumber.from(t.supply).mul(decimals);
+    const tenPct = supply.div(10);
+    // approve and adminDeposit (pool expects admin transferFrom in adminDeposit)
+    // pool.adminDeposit requires admin (deployer) to have approved
+    await token.approve(pool.address, tenPct);
+    const tx = await pool.adminDeposit(token.address, tenPct);
+    await tx.wait();
+    console.log(`Transferred 10% of ${t.symbol} (${tenPct.toString()}) to pool.`);
+  }
+
+  console.log("Deployment finished.");
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

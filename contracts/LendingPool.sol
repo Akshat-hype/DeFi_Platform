@@ -1,185 +1,214 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.17;
 
-interface IERC20 {
-    function transferFrom(address from, address to, uint256 amt) external returns (bool);
-    function transfer(address to, uint256 amt) external returns (bool);
-    function balanceOf(address who) external view returns (uint256);
-    function decimals() external view returns (uint8);
-}
-
-interface IInterestRateModel {
-    function getFees(address token) external view returns (uint256 depBps, uint256 wdrBps);
-}
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPriceFeed {
-    // returns price * 100 (two decimals) in USDT terms
     function getPrice(string memory symbol) external view returns (uint256);
 }
 
 contract LendingPool {
-    IInterestRateModel public irm;
     IPriceFeed public priceFeed;
-    address public owner;
+    address public admin;
 
-    // token => symbol string for oracle lookup
-    mapping(address => string) public tokenSymbol;
+    uint256 constant WAD = 1e18;
 
-    // bookkeeping arrays to iterate tokens
-    address[] public supportedTokens;
+    struct TokenConfig {
+        IERC20 token;
+        string symbol;          // symbol key for price feed, e.g. "bitcoin"
+        uint256 lendRateWad;    // annual lender rate (WAD, e.g. 0.01e18 for 1%)
+        uint256 borrowRateWad;  // annual borrower rate (WAD)
+        uint256 totalDeposits;  // token units (raw)
+    }
 
-    // accounting: user deposited balances (credited after deposit fee)
-    mapping(address => mapping(address => uint256)) public userBalances;
+    // maps token address => config
+    mapping(address => TokenConfig) public configs;
 
-    // accounting: user borrows per token
-    mapping(address => mapping(address => uint256)) public userBorrows;
+    // user => token => deposit balance
+    mapping(address => mapping(address => uint256)) public deposits;
 
-    // constants
-    uint256 public constant SCALE = 1e18;
-    uint256 public constant LTV_BPS = 7000; // 70% LTV
+    // Loans (simple per-borrower single loan per token for demo)
+    struct Loan {
+        uint256 principal;       // borrowed amount (raw token units)
+        uint256 lastAccrued;     // timestamp interest last accrued
+        uint256 accInterest;     // accumulated interest (raw token units)
+    }
+    // borrower => token => Loan
+    mapping(address => mapping(address => Loan)) public loans;
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "NOT_OWNER");
+    // collateral token used for borrowing (we'll use USDT)
+    IERC20 public collateralToken;
+    string public collateralSymbol;
+    uint256 public collateralFactorWad; // e.g., 0.5e18 for 50%
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "only admin");
         _;
     }
 
-    event Deposited(address indexed user, address indexed token, uint256 amount, uint256 fee, uint256 credited);
-    event Withdrawn(address indexed user, address indexed token, uint256 amount, uint256 fee, uint256 paidOut);
-    event Borrowed(address indexed user, address indexed token, uint256 amount, uint256 usdCents);
-    event Repaid(address indexed user, address indexed token, uint256 amount);
-
-    constructor(IInterestRateModel _irm, IPriceFeed _pf) {
-        irm = _irm;
-        priceFeed = _pf;
-        owner = msg.sender;
+    constructor(address _priceFeed) {
+        priceFeed = IPriceFeed(_priceFeed);
+        admin = msg.sender;
+        collateralFactorWad = 0.5e18; // 50%
     }
 
-    function setTokenSymbol(address token, string calldata symbol) external onlyOwner {
-        // if not previously added, add to supportedTokens for enumeration
-        if (bytes(tokenSymbol[token]).length == 0) {
-            supportedTokens.push(token);
+    // Admin: configure tokens
+    function addToken(
+        address tokenAddr,
+        string memory symbol,
+        uint256 lendRateWad,
+        uint256 borrowRateWad
+    ) external onlyAdmin {
+        configs[tokenAddr] = TokenConfig({
+            token: IERC20(tokenAddr),
+            symbol: symbol,
+            lendRateWad: lendRateWad,
+            borrowRateWad: borrowRateWad,
+            totalDeposits: 0
+        });
+    }
+
+    // Set collateral token (USDT)
+    function setCollateral(address tokenAddr, string memory symbol) external onlyAdmin {
+        collateralToken = IERC20(tokenAddr);
+        collateralSymbol = symbol;
+    }
+
+    // deposit (lend) tokens into pool
+    function deposit(address tokenAddr, uint256 amount) external {
+        require(amount > 0, "zero");
+        TokenConfig storage cfg = configs[tokenAddr];
+        require(address(cfg.token) != address(0), "token not supported");
+        // transfer from user
+        cfg.token.transferFrom(msg.sender, address(this), amount);
+        deposits[msg.sender][tokenAddr] += amount;
+        cfg.totalDeposits += amount;
+    }
+
+    // withdraw deposited tokens
+    function withdraw(address tokenAddr, uint256 amount) external {
+        require(amount > 0, "zero");
+        require(deposits[msg.sender][tokenAddr] >= amount, "insufficient");
+        TokenConfig storage cfg = configs[tokenAddr];
+        // TODO: check pool liquidity
+        deposits[msg.sender][tokenAddr] -= amount;
+        cfg.totalDeposits -= amount;
+        cfg.token.transfer(msg.sender, amount);
+    }
+
+    // Borrow tokenAddr by posting collateral in USDT (collateralToken)
+    // collateralAmount supplied must be approved and transferred before calling
+    function borrow(address tokenAddr, uint256 amount, uint256 collateralAmount) external {
+        require(amount > 0, "zero borrow");
+        TokenConfig storage cfg = configs[tokenAddr];
+        require(address(cfg.token) != address(0), "token not supported");
+
+        // Transfer collateral from borrower to contract
+        collateralToken.transferFrom(msg.sender, address(this), collateralAmount);
+
+        // compute collateral value in USDT via price feed (collateral is USDT so 1:1)
+        // but we keep general form:
+        uint256 collateralValueUsdt = collateralAmount; // USDT has 1e18 decimals? we'll assume raw units, be careful in frontend
+
+        // Now compute maximum borrow allowed based on collateral factor
+        // Need to value requested token in USDT: tokenPrice = priceFeed.getPrice(symbol) -> price is scaled by 100 (your fetcher)
+        uint256 tokenPrice = priceFeed.getPrice(cfg.symbol); // e.g. priceInUSDT * 100
+        require(tokenPrice > 0, "zero price");
+        // convert requested amount to USDT value:
+        // tokenValueUsdt = amount * tokenPrice / 100
+        uint256 tokenValueUsdt = (amount * tokenPrice) / 100;
+
+        // allowed = collateralValueUsdt * collateralFactor
+        uint256 allowed = (collateralValueUsdt * collateralFactorWad) / WAD;
+
+        require(tokenValueUsdt <= allowed, "insufficient collateral");
+
+        // ensure pool has liquidity
+        require(cfg.totalDeposits >= amount, "no liquidity");
+
+        // create/update loan; accumulate interest before increasing principal
+        _accrueInterest(msg.sender, tokenAddr);
+
+        loans[msg.sender][tokenAddr].principal += amount;
+        loans[msg.sender][tokenAddr].lastAccrued = block.timestamp;
+
+        // transfer borrowed tokens to borrower
+        cfg.token.transfer(msg.sender, amount);
+        cfg.totalDeposits -= amount;
+    }
+
+    // repay borrowed token
+    function repay(address tokenAddr, uint256 amount) external {
+        require(amount > 0, "zero repay");
+        Loan storage loan = loans[msg.sender][tokenAddr];
+        require(loan.principal > 0 || loan.accInterest > 0, "no loan");
+        // accrue first
+        _accrueInterest(msg.sender, tokenAddr);
+
+        // transfer token from borrower
+        TokenConfig storage cfg = configs[tokenAddr];
+        cfg.token.transferFrom(msg.sender, address(this), amount);
+
+        // pay interest first
+        if (amount >= loan.accInterest) {
+            amount -= loan.accInterest;
+            loan.accInterest = 0;
+        } else {
+            loan.accInterest -= amount;
+            amount = 0;
         }
-        tokenSymbol[token] = symbol;
-    }
 
-    // deposit: user must approve token amount to pool first
-    function deposit(address token, uint256 amount) external {
-        require(amount > 0, "AMT_ZERO");
-        (uint256 depBps, ) = irm.getFees(token);
-        uint256 fee = (amount * depBps) / 10000;
-        uint256 credited = amount - fee;
-
-        require(IERC20(token).transferFrom(msg.sender, address(this), amount), "TRANSFER_FAIL");
-
-        userBalances[msg.sender][token] += credited;
-
-        emit Deposited(msg.sender, token, amount, fee, credited);
-    }
-
-    function withdraw(address token, uint256 amount) external {
-        require(amount > 0, "AMT_ZERO");
-        uint256 bal = userBalances[msg.sender][token];
-        require(bal >= amount, "INSUFFICIENT_BAL");
-
-        (, uint256 wdrBps) = irm.getFees(token);
-        uint256 fee = (amount * wdrBps) / 10000;
-        uint256 sendOut = amount - fee;
-
-        userBalances[msg.sender][token] = bal - amount;
-
-        require(IERC20(token).transfer(msg.sender, sendOut), "SEND_FAIL");
-
-        emit Withdrawn(msg.sender, token, amount, fee, sendOut);
-    }
-
-    // ===== Borrowing logic =====
-
-    /// @notice Borrow `amount` of `token` if user has sufficient collateral (LTV)
-    function borrow(address token, uint256 amount) external {
-        require(amount > 0, "AMT_ZERO");
-        require(bytes(tokenSymbol[token]).length > 0, "TOKEN_UNSUPPORTED");
-
-        // compute user's total collateral value in USD cents (price *100)
-        uint256 totalCollateralUsdCents = getTotalUserValueUSD(msg.sender);
-
-        // maximum allowed to borrow in USD cents
-        uint256 maxBorrowUsdCents = (totalCollateralUsdCents * LTV_BPS) / 10000;
-
-        // compute currently borrowed value in USD cents
-        uint256 currentBorrowedUsdCents = getTotalBorrowedValueUSD(msg.sender);
-
-        // compute this requested borrow's USD cents
-        string memory sym = tokenSymbol[token];
-        uint256 priceCents = priceFeed.getPrice(sym); // price * 100
-        uint256 borrowUsdCents = (amount * priceCents) / SCALE;
-
-        require(currentBorrowedUsdCents + borrowUsdCents <= maxBorrowUsdCents, "EXCEEDS_BORROW_LIMIT");
-
-        // transfer the token to borrower (pool must have liquidity)
-        require(IERC20(token).transfer(msg.sender, amount), "TRANSFER_FAIL");
-
-        // record the borrow
-        userBorrows[msg.sender][token] += amount;
-
-        emit Borrowed(msg.sender, token, amount, borrowUsdCents);
-    }
-
-    /// @notice Repay `amount` of borrowed `token`
-    function repay(address token, uint256 amount) external {
-        require(amount > 0, "AMT_ZERO");
-        uint256 debt = userBorrows[msg.sender][token];
-        require(debt > 0, "NO_DEBT");
-
-        uint256 pay = amount > debt ? debt : amount;
-
-        require(IERC20(token).transferFrom(msg.sender, address(this), pay), "TRANSFER_FAIL");
-
-        userBorrows[msg.sender][token] = debt - pay;
-
-        emit Repaid(msg.sender, token, pay);
-    }
-
-    // ===== Views & Helpers =====
-
-    // returns price *100 for given token (requires tokenSymbol set)
-    function priceFor(address token) public view returns (uint256) {
-        string memory sym = tokenSymbol[token];
-        require(bytes(sym).length > 0, "UNLISTED");
-        return priceFeed.getPrice(sym);
-    }
-
-    // total USD cents value of a specific user's deposits across all supported tokens
-    function getTotalUserValueUSD(address user) public view returns (uint256 totalUsdCents) {
-        uint256 len = supportedTokens.length;
-        for (uint256 i = 0; i < len; i++) {
-            address t = supportedTokens[i];
-            uint256 bal = userBalances[user][t];
-            if (bal == 0) continue;
-            uint256 priceCents = priceFeed.getPrice(tokenSymbol[t]); // price *100
-            // bal (1e18) * priceCents -> scaled by 1e18, divide to get cents
-            totalUsdCents += (bal * priceCents) / SCALE;
+        // pay principal
+        if (amount > 0) {
+            if (amount >= loan.principal) {
+                uint256 leftover = amount - loan.principal;
+                loan.principal = 0;
+                // any leftover becomes deposit to user
+                deposits[msg.sender][tokenAddr] += leftover;
+                cfg.totalDeposits += leftover;
+            } else {
+                loan.principal -= amount;
+            }
         }
+
+        loan.lastAccrued = block.timestamp;
     }
 
-    // total USD cents value of a user's borrows across all tokens
-    function getTotalBorrowedValueUSD(address user) public view returns (uint256 borrowedUsdCents) {
-        uint256 len = supportedTokens.length;
-        for (uint256 i = 0; i < len; i++) {
-            address t = supportedTokens[i];
-            uint256 debt = userBorrows[user][t];
-            if (debt == 0) continue;
-            uint256 priceCents = priceFeed.getPrice(tokenSymbol[t]);
-            borrowedUsdCents += (debt * priceCents) / SCALE;
+    // utility to accrue interest for a borrower/token
+    function _accrueInterest(address borrower, address tokenAddr) internal {
+        Loan storage loan = loans[borrower][tokenAddr];
+        if (loan.principal == 0) {
+            loan.lastAccrued = block.timestamp;
+            return;
         }
+        uint256 elapsed = block.timestamp - (loan.lastAccrued == 0 ? block.timestamp : loan.lastAccrued);
+        if (elapsed == 0) return;
+
+        TokenConfig storage cfg = configs[tokenAddr];
+        // borrow rate annual WAD
+        uint256 annualRate = cfg.borrowRateWad;
+        // interest = principal * annualRate * elapsed / secondsPerYear
+        uint256 secondsPerYear = 365 * 24 * 3600;
+        // principal * annualRate gives WAD*raw -> need to scale by WAD
+        uint256 interest = (loan.principal * annualRate / WAD) * elapsed / secondsPerYear;
+        loan.accInterest += interest;
+        loan.lastAccrued = block.timestamp;
     }
 
-    // pool liquidity for a token
-    function getPoolLiquidity(address token) external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
+    // Admin can deposit initial liquidity on behalf of deployer if needed
+    function adminDeposit(address tokenAddr, uint256 amount) external onlyAdmin {
+        TokenConfig storage cfg = configs[tokenAddr];
+        cfg.token.transferFrom(msg.sender, address(this), amount);
+        cfg.totalDeposits += amount;
     }
 
-    // simple helper to fetch list of supported tokens
-    function getSupportedTokens() external view returns (address[] memory) {
-        return supportedTokens;
+    // helper getters
+    function getDeposit(address user, address tokenAddr) external view returns (uint256) {
+        return deposits[user][tokenAddr];
+    }
+
+    function getLoan(address user, address tokenAddr) external view returns (uint256 principal, uint256 accInterest, uint256 lastAccrued) {
+        Loan storage l = loans[user][tokenAddr];
+        return (l.principal, l.accInterest, l.lastAccrued);
     }
 }
