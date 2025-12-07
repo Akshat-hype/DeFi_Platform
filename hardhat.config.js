@@ -30,6 +30,10 @@ module.exports = {
   },
   networks: {
     hardhat: {},
+    sepolia: {
+      url:"https://sepolia.infura.io/v3/7884b4e8b71b462f88da824cf871cd97",
+      accounts: ["14ba2e57a4f43523269673b7164bbb937438cce407873ecee1c69e259c12e6b4"],
+    },
   },
 };
 

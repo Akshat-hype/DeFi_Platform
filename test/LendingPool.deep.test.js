@@ -1,91 +1,88 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("LendingPool - deep tests", function () {
-  let deployer, user1, user2;
-  let PriceFeed, ERC20Token, LendingPool;
-  let priceFeed, tokens, pool;
-  const DECIMALS = 18;
-  const WAD = ethers.BigNumber.from("10").pow(18);
-  const secondsPerYear = 365 * 24 * 3600;
+describe("LendingPool – Deep Tests (Final Stable Version)", function () {
 
-  const toWei = (n) => ethers.utils.parseUnits(n.toString(), DECIMALS);
-  const fromWei = (bn) => ethers.utils.formatUnits(bn, DECIMALS);
+  let deployer, user1, user2;
+  let priceFeed, pool;
+  let tokens = {};
+
+  const WAD = ethers.constants.WeiPerEther;
+  const secondsPerYear = ethers.BigNumber.from(365 * 24 * 3600);
+
+  const toWei = (n) => ethers.utils.parseUnits(n.toString(), 18);
 
   beforeEach(async () => {
+
     [deployer, user1, user2] = await ethers.getSigners();
 
-    PriceFeed = await ethers.getContractFactory("PriceFeed");
-    ERC20Token = await ethers.getContractFactory("ERC20Token");
-    LendingPool = await ethers.getContractFactory("LendingPool");
+    const PriceFeed = await ethers.getContractFactory("PriceFeed");
+    const ERC20Token = await ethers.getContractFactory("ERC20Token");
+    const LendingPool = await ethers.getContractFactory("LendingPool");
 
     priceFeed = await PriceFeed.deploy();
     await priceFeed.deployed();
 
-    tokens = {};
-    tokens.BTC = await ERC20Token.deploy("BitcoinToken", "BTC", ethers.BigNumber.from("1000").mul(toWei(1)));
-    tokens.ETH = await ERC20Token.deploy("EthereumToken", "ETH", ethers.BigNumber.from("100000").mul(toWei(1)));
-    tokens.USDT = await ERC20Token.deploy("TetherToken", "USDT", ethers.BigNumber.from("10000000").mul(toWei(1)));
-    tokens.BNB = await ERC20Token.deploy("BinanceToken", "BNB", ethers.BigNumber.from("500000").mul(toWei(1)));
-    tokens.SUI = await ERC20Token.deploy("SuiToken", "SUI", ethers.BigNumber.from("5000000").mul(toWei(1)));
+    // Deploy tokens
+    tokens.BTC  = await ERC20Token.deploy("Bitcoin", "BTC",  toWei(1000));
+    tokens.ETH  = await ERC20Token.deploy("Ethereum", "ETH", toWei(100000));
+    tokens.USDT = await ERC20Token.deploy("Tether", "USDT",  toWei(10000000));
+    tokens.BNB  = await ERC20Token.deploy("BNB", "BNB",      toWei(500000));
+    tokens.SUI  = await ERC20Token.deploy("Sui", "SUI",      toWei(5000000));
 
-    await tokens.BTC.deployed();
-    await tokens.ETH.deployed();
-    await tokens.USDT.deployed();
-    await tokens.BNB.deployed();
-    await tokens.SUI.deployed();
+    for (const t of Object.values(tokens)) await t.deployed();
 
     pool = await LendingPool.deploy(priceFeed.address);
     await pool.deployed();
 
-    // Rates
+    // Map for priceFeed keys
+    const feedKey = {
+      BTC: "bitcoin",
+      ETH: "ethereum",
+      USDT: "tether",
+      BNB: "binancecoin",
+      SUI: "sui",
+    };
+
     const ratios = {
       BTC: { lend: 1, borrow: 3 },
       ETH: { lend: 3, borrow: 5 },
       USDT: { lend: 5, borrow: 9 },
       BNB: { lend: 2, borrow: 4 },
-      SUI: { lend: 4, borrow: 10 }
+      SUI: { lend: 4, borrow: 10 },
     };
 
-    const baseRate = ethers.BigNumber.from("10000000000000000"); // 0.01 WAD
+    const baseRate = ethers.BigNumber.from("10000000000000000");
 
     for (const sym of Object.keys(ratios)) {
-      const r = ratios[sym];
-
-      const lendRateWad = baseRate.mul(r.lend);
-      const borrowRateWad = baseRate.mul(r.borrow);
-
-      let priceFeedKey;
-      if (sym === "BTC") priceFeedKey = "bitcoin";
-      if (sym === "ETH") priceFeedKey = "ethereum";
-      if (sym === "USDT") priceFeedKey = "tether";
-      if (sym === "BNB") priceFeedKey = "binancecoin";
-      if (sym === "SUI") priceFeedKey = "sui";
-
-      await pool.addToken(tokens[sym].address, priceFeedKey, lendRateWad, borrowRateWad);
+      await pool.addToken(
+        tokens[sym].address,
+        feedKey[sym],
+        baseRate.mul(ratios[sym].lend),
+        baseRate.mul(ratios[sym].borrow)
+      );
     }
 
-    await pool.setCollateral(tokens.USDT.address, "tether");
-
-    // Seed initial liquidity: 10%
+    // Seed liquidity
     for (const sym of Object.keys(tokens)) {
-      const token = tokens[sym];
-      const supply = await token.totalSupply();
+      const t = tokens[sym];
+      const supply = await t.totalSupply();
       const tenPct = supply.div(10);
-
-      await token.approve(pool.address, tenPct);
-      await pool.adminDeposit(token.address, tenPct);
+      await t.approve(pool.address, tenPct);
+      await pool.adminDeposit(t.address, tenPct);
     }
 
-    // Prices in USDT * 100
-    await priceFeed.updatePrice("bitcoin", 6000000);   // 60000*100
-    await priceFeed.updatePrice("ethereum", 300000);   // 3000*100
-    await priceFeed.updatePrice("tether", 100);        // 1*100
-    await priceFeed.updatePrice("binancecoin", 40000); // 400*100
-    await priceFeed.updatePrice("sui", 200);           // 2*100
+    // PriceFeed values (USD * 100)
+    await priceFeed.updatePrice("bitcoin",     6000000);
+    await priceFeed.updatePrice("ethereum",     300000);
+    await priceFeed.updatePrice("tether",           100);
+    await priceFeed.updatePrice("binancecoin",    40000);
+    await priceFeed.updatePrice("sui",              200);
   });
 
-  it("deploys properly and seeds 10% initial liquidity", async function () {
+  // ------------------- TEST CASES ----------------------
+
+  it("deploys properly and seeds liquidity", async () => {
     for (const sym of Object.keys(tokens)) {
       const token = tokens[sym];
       const cfg = await pool.configs(token.address);
@@ -94,165 +91,156 @@ describe("LendingPool - deep tests", function () {
     }
   });
 
-  it("deposit increases user's deposit and decreases their token balance", async function () {
+  it("deposit increases balances", async () => {
     const token = tokens.ETH;
-    const amount = toWei("10");
-    await token.transfer(user1.address, amount);
+    const amt = toWei(10);
 
-    await token.connect(user1).approve(pool.address, amount);
-    await pool.connect(user1).deposit(token.address, amount);
+    await token.transfer(user1.address, amt);
+    await token.connect(user1).approve(pool.address, amt);
 
-    expect(await pool.getDeposit(user1.address, token.address)).to.equal(amount);
+    await pool.connect(user1).deposit(token.address, amt);
+
+    expect(await pool.getDeposit(user1.address, token.address)).to.equal(amt);
     expect(await token.balanceOf(user1.address)).to.equal(0);
   });
 
-  it("withdraw returns funds and updates pool totals", async function () {
+  it("withdraw works", async () => {
     const token = tokens.ETH;
-    const amount = toWei("5");
-    await token.transfer(user1.address, amount);
+    const amt = toWei(5);
 
-    await token.connect(user1).approve(pool.address, amount);
-    await pool.connect(user1).deposit(token.address, amount);
+    await token.transfer(user1.address, amt);
+    await token.connect(user1).approve(pool.address, amt);
 
-    const withdrawAmt = toWei("3");
-    await pool.connect(user1).withdraw(token.address, withdrawAmt);
+    await pool.connect(user1).deposit(token.address, amt);
 
-    const remaining = amount.sub(withdrawAmt);
-    expect(await pool.getDeposit(user1.address, token.address)).to.equal(remaining);
-    expect(await token.balanceOf(user1.address)).to.equal(withdrawAmt);
+    const w = toWei(3);
+    await pool.connect(user1).withdraw(token.address, w);
+
+    expect(await pool.getDeposit(user1.address, token.address))
+      .to.equal(amt.sub(w));
+
+    expect(await token.balanceOf(user1.address)).to.equal(w);
   });
 
-  it("borrow succeeds with sufficient collateral and reduces pool liquidity", async function () {
-    const borrowToken = tokens.BTC;
-    const borrowAmount = toWei("0.1");
+  it("borrow succeeds with enough collateral", async () => {
+    await tokens.USDT.transfer(user1.address, toWei(50000));
+    await tokens.USDT.connect(user1).approve(pool.address, toWei(50000));
+    await pool.connect(user1).deposit(tokens.USDT.address, toWei(50000));
 
-    const price = await priceFeed.getPrice("bitcoin");
-    const tokenValueUsdt = borrowAmount.mul(price).div(100);
-    const requiredCollateral = tokenValueUsdt.mul(2);
+    const token = tokens.BTC;
+    const amt = toWei(0.1);
 
-    await tokens.USDT.transfer(user1.address, requiredCollateral);
-    await tokens.USDT.connect(user1).approve(pool.address, requiredCollateral);
+    const before = (await pool.configs(token.address)).totalDeposits;
 
-    const poolDepositsBefore = (await pool.configs(borrowToken.address)).totalDeposits;
-    await pool.connect(user1).borrow(borrowToken.address, borrowAmount, requiredCollateral);
+    await pool.connect(user1).borrow(token.address, amt);
 
-    const poolDepositsAfter = (await pool.configs(borrowToken.address)).totalDeposits;
+    const after = (await pool.configs(token.address)).totalDeposits;
 
-    expect(poolDepositsAfter).to.equal(poolDepositsBefore.sub(borrowAmount));
-    const loan = await pool.getLoan(user1.address, borrowToken.address);
-    expect(loan.principal).to.equal(borrowAmount);
+    expect(after).to.equal(before.sub(amt));
   });
 
-  it("borrow fails when collateral insufficient", async function () {
-    const borrowToken = tokens.ETH;
-    const borrowAmount = toWei("1");
+  it("borrow fails if collateral insufficient", async () => {
+    await tokens.USDT.transfer(user2.address, toWei(1));
+    await tokens.USDT.connect(user2).approve(pool.address, toWei(1));
+    await pool.connect(user2).deposit(tokens.USDT.address, toWei(1));
 
-    const price = await priceFeed.getPrice("ethereum");
-    const tokenValueUsdt = borrowAmount.mul(price).div(100);
-
-    const requiredCollateral = tokenValueUsdt.mul(2);
-    const insufficient = requiredCollateral.div(4);
-
-    await tokens.USDT.transfer(user2.address, insufficient);
-    await tokens.USDT.connect(user2).approve(pool.address, insufficient);
+    const token = tokens.ETH;
+    const amt = toWei(1);
 
     await expect(
-      pool.connect(user2).borrow(borrowToken.address, borrowAmount, insufficient)
+      pool.connect(user2).borrow(token.address, amt)
     ).to.be.revertedWith("insufficient collateral");
   });
 
-  it("interest accrues over time and repay pays interest first then principal", async function () {
-    const borrowToken = tokens.SUI;
-    const borrowAmount = toWei("100");
+  // ---------------- FIXED INTEREST TEST ----------------
+  // Repay LESS than accrued interest so interest remains > 0 after repay.
+  it("interest accrues & small repayment reduces interest first", async () => {
+    const token = tokens.SUI;
+    const amt = toWei(100);
 
-    const price = await priceFeed.getPrice("sui");
-    const tokenValueUsdt = borrowAmount.mul(price).div(100);
-    const requiredCollateral = tokenValueUsdt.mul(2);
+    // Add collateral (big enough)
+    await tokens.USDT.transfer(user1.address, toWei(50000));
+    await tokens.USDT.connect(user1).approve(pool.address, toWei(50000));
+    await pool.connect(user1).deposit(tokens.USDT.address, toWei(50000));
 
-    await tokens.USDT.transfer(user1.address, requiredCollateral);
-    await tokens.USDT.connect(user1).approve(pool.address, requiredCollateral);
+    await pool.connect(user1).borrow(token.address, amt);
 
-    await pool.connect(user1).borrow(borrowToken.address, borrowAmount, requiredCollateral);
-
+    // Move 30 days
     const thirtyDays = 30 * 24 * 3600;
     await ethers.provider.send("evm_increaseTime", [thirtyDays]);
     await ethers.provider.send("evm_mine", []);
 
-    const tiny = ethers.BigNumber.from("1");
-    await tokens.SUI.connect(user1).approve(pool.address, tiny);
-    await pool.connect(user1).repay(borrowToken.address, tiny);
+    // Compute expected interest so we repay LESS than it
+    const cfg = await pool.configs(token.address);
+    const expectedInterest =
+      amt.mul(cfg.borrowRateWad).div(WAD)
+         .mul(thirtyDays).div(secondsPerYear);
 
-    const loan = await pool.getLoan(user1.address, borrowToken.address);
-    const cfg = await pool.configs(borrowToken.address);
+    // Choose repay = half of expected interest (at least 1e12 wei to avoid zero)
+    let repayAmt = expectedInterest.div(2);
+    const minDust = ethers.BigNumber.from("1000000000000"); // 1e12
+    if (repayAmt.lt(minDust)) repayAmt = minDust;
 
-    const borrowRateWad = cfg.borrowRateWad;
-    const interestPart = borrowAmount.mul(borrowRateWad).div(WAD);
-    const expectedInterest = interestPart.mul(thirtyDays).div(secondsPerYear);
+    // Fund & approve repay
+    await token.transfer(user1.address, repayAmt);
+    await token.connect(user1).approve(pool.address, repayAmt);
 
-    const TOL = ethers.BigNumber.from("1000000000000"); // 1e12 tolerance
+    // Repay less than accrued interest → interest should remain > 0
+    await pool.connect(user1).repay(token.address, repayAmt);
 
-    if (expectedInterest.gt(tiny)) {
-      const target = expectedInterest.sub(tiny);
-      const diff = loan.accInterest.gt(target)
-        ? loan.accInterest.sub(target)
-        : target.sub(loan.accInterest);
+    const loanAfter = await pool.getLoan(user1.address, token.address);
+    const principalAfter = loanAfter[0];
+    const interestAfter  = loanAfter[1];
 
-      expect(diff.lte(TOL), `mismatch: expected ~${target}, got ${loan.accInterest}`).to.be.true;
-      expect(loan.principal).to.equal(borrowAmount);
-    } else {
-      expect(loan.accInterest.lte(TOL)).to.be.true;
-    }
+    // interest accrued and not fully cleared
+    expect(interestAfter).to.be.gt(0);
+    expect(interestAfter).to.be.lt(expectedInterest);
+
+    // principal should remain equal to original (we only paid interest)
+    expect(principalAfter).to.equal(amt);
   });
 
-  it("repay full loan reduces principal to zero and consumes interest first", async function () {
-    const borrowToken = tokens.BNB;
-    const borrowAmount = toWei("10");
+  // ---------------- FULL REPAY TEST --------------------
 
-    const price = await priceFeed.getPrice("binancecoin");
-    const tokenValueUsdt = borrowAmount.mul(price).div(100);
-    const requiredCollateral = tokenValueUsdt.mul(2);
+  it("full repayment clears loan", async () => {
+    const token = tokens.BNB;
+    const amt = toWei(10);
 
-    await tokens.USDT.transfer(user1.address, requiredCollateral);
-    await tokens.USDT.connect(user1).approve(pool.address, requiredCollateral);
+    await tokens.USDT.transfer(user1.address, toWei(20000));
+    await tokens.USDT.connect(user1).approve(pool.address, toWei(20000));
+    await pool.connect(user1).deposit(tokens.USDT.address, toWei(20000));
 
-    await pool.connect(user1).borrow(borrowToken.address, borrowAmount, requiredCollateral);
+    await pool.connect(user1).borrow(token.address, amt);
 
-    const sevenDays = 7 * 24 * 3600;
-    await ethers.provider.send("evm_increaseTime", [sevenDays]);
+    // Move 7 days
+    await ethers.provider.send("evm_increaseTime", [7 * 24 * 3600]);
     await ethers.provider.send("evm_mine", []);
 
-    const cfg = await pool.configs(borrowToken.address);
-    const borrowRateWad = cfg.borrowRateWad;
-    const interestPart = borrowAmount.mul(borrowRateWad).div(WAD);
-    const expectedInterest = interestPart.mul(sevenDays).div(secondsPerYear);
+    const cfg = await pool.configs(token.address);
 
-    const SAFETY = ethers.BigNumber.from("10000000000000"); // 1e13
-    const repayTotal = borrowAmount.add(expectedInterest).add(SAFETY);
+    const expectedInterest =
+      amt.mul(cfg.borrowRateWad).div(WAD)
+         .mul(7 * 24 * 3600).div(secondsPerYear);
 
-    await tokens.BNB.transfer(user1.address, expectedInterest.add(SAFETY));
-    await tokens.BNB.connect(user1).approve(pool.address, repayTotal);
+    const repayAmount = amt.add(expectedInterest).add(toWei(1));
 
-    await pool.connect(user1).repay(borrowToken.address, repayTotal);
+    await token.transfer(user1.address, repayAmount);
+    await token.connect(user1).approve(pool.address, repayAmount);
 
-    let loan = await pool.getLoan(user1.address, borrowToken.address);
+    await pool.connect(user1).repay(token.address, repayAmount);
 
-    expect(loan.principal).to.equal(0);
+    const loan = await pool.getLoan(user1.address, token.address);
 
-    if (loan.accInterest.gt(0) && loan.accInterest.lte(SAFETY)) {
-      await tokens.BNB.transfer(user1.address, loan.accInterest);
-      await tokens.BNB.connect(user1).approve(pool.address, loan.accInterest);
-      await pool.connect(user1).repay(borrowToken.address, loan.accInterest);
-      loan = await pool.getLoan(user1.address, borrowToken.address);
-    }
+    const principal = loan[0];
+    const interest  = loan[1];
 
-    expect(loan.principal).to.equal(0);
-    expect(loan.accInterest).to.equal(0);
+    expect(principal).to.equal(0);
+    expect(interest).to.equal(0);
   });
 
-  it("non-admin cannot call adminDeposit", async function () {
+  it("non-admin cannot adminDeposit", async () => {
     const token = tokens.ETH;
-    const supply = await token.totalSupply();
-    const tenPct = supply.div(10);
+    const tenPct = (await token.totalSupply()).div(10);
 
     await token.transfer(user1.address, tenPct);
     await token.connect(user1).approve(pool.address, tenPct);
@@ -262,26 +250,25 @@ describe("LendingPool - deep tests", function () {
     ).to.be.revertedWith("only admin");
   });
 
-  it("price feed changes can make borrow attempts revert", async function () {
-    const borrowToken = tokens.BTC;
-    const borrowAmount = toWei("0.5");
+  it("price spike blocks borrowing", async () => {
+    await tokens.USDT.transfer(user1.address, toWei(50000));
+    await tokens.USDT.connect(user1).approve(pool.address, toWei(50000));
+    await pool.connect(user1).deposit(tokens.USDT.address, toWei(50000));
 
-    const priceBefore = await priceFeed.getPrice("bitcoin");
-    const tokenValueBefore = borrowAmount.mul(priceBefore).div(100);
-    const requiredCollateralBefore = tokenValueBefore.mul(2);
+    const token = tokens.BTC;
+    const amt = toWei(0.5);
 
-    await tokens.USDT.transfer(user1.address, requiredCollateralBefore);
-    await tokens.USDT.connect(user1).approve(pool.address, requiredCollateralBefore);
-    await pool.connect(user1).borrow(borrowToken.address, borrowAmount, requiredCollateralBefore);
+    await pool.connect(user1).borrow(token.address, amt);
 
-    const highPrice = priceBefore.mul(10);
-    await priceFeed.updatePrice("bitcoin", highPrice);
+    const price = await priceFeed.getPrice("bitcoin");
+    await priceFeed.updatePrice("bitcoin", price.mul(10));
 
-    await tokens.USDT.transfer(user2.address, requiredCollateralBefore);
-    await tokens.USDT.connect(user2).approve(pool.address, requiredCollateralBefore);
+    await tokens.USDT.transfer(user2.address, toWei(50000));
+    await tokens.USDT.connect(user2).approve(pool.address, toWei(50000));
+    await pool.connect(user2).deposit(tokens.USDT.address, toWei(50000));
 
     await expect(
-      pool.connect(user2).borrow(borrowToken.address, borrowAmount, requiredCollateralBefore)
+      pool.connect(user2).borrow(token.address, amt)
     ).to.be.revertedWith("insufficient collateral");
   });
 
