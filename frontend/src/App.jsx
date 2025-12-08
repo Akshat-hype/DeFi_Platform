@@ -12,15 +12,17 @@ import LendingPoolABI from "./abis/LendingPool.json";
 import ERC20ABI from "./abis/ERC20Token.json";
 
 /* ----------------- HARDHAT-LOCAL CONFIG ----------------- */
-const POOL_ADDRESS = "0x67baFF31318638F497f4c4894Cd73918563942c8";
+const POOL_ADDRESS = "0x1780bCf4103D3F501463AD3414c7f4b654bb7aFd";
 
 const TOKENS = {
-  BTC: "0x4f42528B7bF8Da96516bECb22c1c6f53a8Ac7312",
-ETH: "0x8f119cd256a0FfFeed643E830ADCD9767a1d517F",
-USDT: "0xe14058B1c3def306e2cb37535647A04De03Db092",
-BNB: "0x74ef2B06A1D2035C33244A4a263FF00B84504865",
-SUI: "0xF5b81Fe0B6F378f9E6A3fb6A6cD1921FCeA11799",
+  BTC: "0x045857BDEAE7C1c7252d611eB24eB55564198b4C",
+ETH: "0x2b5A4e5493d4a54E717057B127cf0C000C876f9B",
+USDT: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
+BNB: "0x02df3a3F960393F5B349E40A599FEda91a7cc1A7",
+SUI: "0x821f3361D454cc98b7555221A06Be563a7E2E0A6",
 };
+
+
 
 const tokenOptions = Object.keys(TOKENS);
 const format = (v) => {
@@ -38,7 +40,6 @@ export default function App() {
 
   const [selectedToken, setSelectedToken] = useState("BTC");
   const [amount, setAmount] = useState("");
-  const [collateralInput, setCollateralInput] = useState("100");
 
   const [balances, setBalances] = useState({});
   const [poolLiquidity, setPoolLiquidity] = useState({});
